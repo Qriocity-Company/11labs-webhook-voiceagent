@@ -1,24 +1,19 @@
-// api/[...all].js
+// api/[...all].js  (this file lives in /api)
 import app from '../server.js';
 
 export default function handler(req, res) {
-  // Build the path from the catch-all segments
-  const segs = req.query?.all;
-  const pathFromAll = segs
-    ? '/' + (Array.isArray(segs) ? segs.join('/') : segs)
-    : '/';
+  // Strip the external /api prefix Vercel uses
+  // /api/projects -> /projects, /api -> /
+  req.url = req.url.replace(/^\/api(\/|$)/, '/');
 
-  // Keep original query string but strip the helper "all=" param if present
-  const rawQs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-  const qs = rawQs
-    .replace(/(^\?|\&)all=[^&]*/g, '$1')
-    .replace(/\?&/, '?')
-    .replace(/\?$/, '');
+  // Optional: drop the helper `all=` param Vercel adds for catch-all
+  try {
+    const u = new URL(req.url, 'http://internal');
+    u.searchParams.delete('all');
+    req.url = u.pathname + (u.search || '');
+  } catch {}
 
-  // Your Express app expects /api/* paths — rebuild that URL precisely
-  req.url = '/api' + pathFromAll + (qs || '');
-
-  // Cheap global CORS preflight (optional; your app already does CORS)
+  // Basic CORS for OPTIONS at the edge (your app also sets CORS)
   if (req.method === 'OPTIONS') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
