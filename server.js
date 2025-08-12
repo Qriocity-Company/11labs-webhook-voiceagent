@@ -424,6 +424,19 @@ app.get('/kb/:key', async (req, res) => {
     }
 });
 
+app.get('/kb', async (req, res) => {
+  try {
+    const key = req.query.key;
+    if (!key) return res.status(400).json({ error: 'key required' });
+    const { title, text } = await assembleKB(key);
+    res.json({ title, text });
+  } catch (e) {
+    console.error('KB assembly error:', e);
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+
 app.post('/push', async (req, res) => {
     try {
         const { project, mode } = req.body || {};
