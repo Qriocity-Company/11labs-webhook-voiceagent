@@ -1,7 +1,7 @@
 {
   "version": 2,
   "functions": {
-    "api/server.js": { "runtime": "nodejs@20.x", "memory": 1024, "maxDuration": 10 }
+    "api/server.js": { "runtime": "nodejs@20.19.3", "memory": 1024, "maxDuration": 10 }
   },
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/server.js" }
