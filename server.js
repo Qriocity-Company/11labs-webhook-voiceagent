@@ -535,5 +535,18 @@ app.get('/diag', (_req, res) => {
     });
 });
 
+// JSON 404 with CORS
+app.use((req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.status(404).json({ error: 'not_found', path: req.originalUrl });
+});
+
+// JSON error with CORS
+app.use((err, req, res, _next) => {
+  console.error('Unhandled error:', err);
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.status(err.status || 500).json({ error: 'internal_error', message: err.message || 'oops' });
+});
+
 // Export the Express app for Vercel (instead of server.listen)
 export default app;
