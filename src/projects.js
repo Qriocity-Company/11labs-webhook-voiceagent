@@ -4,10 +4,14 @@ import fetch from 'node-fetch';
 
 const PROJECTS_DIR = path.resolve('src/projects');
 
-async function ensureDir(dir) {
-  await fs.mkdir(dir, { recursive: true });
+async function dirExists(p) {
+  try {
+    const s = await fs.stat(p);
+    return s.isDirectory();
+  } catch {
+    return false;
+  }
 }
-
 async function loadDoc(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.txt' || ext === '.md') {
@@ -28,7 +32,7 @@ async function loadDoc(filePath) {
 }
 
 async function scanProjects() {
-  await ensureDir(PROJECTS_DIR);
+  if (!(await dirExists(PROJECTS_DIR))) return {};
   const dirs = await fs.readdir(PROJECTS_DIR, { withFileTypes: true });
   const projects = {};
   for (const dir of dirs) {
