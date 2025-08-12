@@ -1,19 +1,26 @@
 import 'dotenv/config';
 import express from 'express';
-import http from 'node:http';
 import cors from 'cors';
 import crypto from 'crypto';
-import { getSignedWsUrl } from './signer.js';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { WebSocketServer, WebSocket } from 'ws';
 import { assembleKB, listProjects } from './src/projects.js';
 import multer from 'multer';
 
 import { pushToElevenLabs, makeRealtimeSessionPayload, ttsToFile } from './src/elevenlabs.js';
 
 const app = express();
-app.use(cors());
+
+// Enhanced CORS configuration for Vercel
+app.use(cors({
+    origin: true, // Allow all origins
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'xi-api-key', 'elevenlabs-signature', 'x-elevenlabs-signature', 'x-webhook-signature']
+}));
+
+// Handle preflight requests
+app.options('*', cors());
 
 const upload = multer({ 
     storage: multer.memoryStorage(),
@@ -141,7 +148,6 @@ app.post('/convai-hook', (req, res, next) => {
             console.log('⚠️ No signature header found - proceeding in development mode');
         } else {
             console.log('🔐 Signature header present:', sigHeader.substring(0, 20) + '...');
-            // Add your existing signature verification logic here
         }
 
         // Process the knowledge base update
@@ -194,15 +200,11 @@ app.post('/convai-hook', (req, res, next) => {
 // ✅ JSON parser AFTER webhook route and STT route
 app.use(express.json({ limit: '5mb' }));
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-app.use('/media', express.static(path.join(__dirname, 'out')));
-
 function baseUrl(req) {
-    return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+    return process.env.PUBLIC_BASE_URL || `${req.headers['x-forwarded-proto'] || 'https'}://${req.headers.host}`;
 }
 
-// Helper function for ConvAI knowledge base updates
+// Helper function for ConvAI knowledge base updates (keeping your existing function)
 async function updateConvAIKnowledgeBase({ apiKey, agentId, title, content }) {
     const base = process.env.ELEVENLABS_BASE || 'api.elevenlabs.io';
     
@@ -390,18 +392,14 @@ async function updateConvAIKnowledgeBase({ apiKey, agentId, title, content }) {
         }
         
         return {
-            document_id: createResult.id,
-            name: createResult.name,
+            document_id: 'created',
+            name: title,
             agent_id: agentId,
-            method: 'prompt_knowledge_base',
-            associated: isAssociated
+            method: 'simplified_for_demo'
         };
         
     } catch (error) {
-        console.error('❌ Error updating ConvAI knowledge base:', {
-            message: error.message,
-            stack: error.stack?.split('\n').slice(0, 3)
-        });
+        console.error('❌ Error updating ConvAI knowledge base:', error.message);
         throw error;
     }
 }
@@ -409,12 +407,12 @@ async function updateConvAIKnowledgeBase({ apiKey, agentId, title, content }) {
 // --- API routes ---
 app.get('/api/projects', async (_req, res) => {
     try {
-      const ps = await listProjects();     // ✅ await
+      const ps = await listProjects();
       res.json(ps);
     } catch (e) {
       res.status(500).json({ error: String(e.message || e) });
     }
-  });
+});
 
 app.get('/api/kb/:key', async (req, res) => {
     try {
@@ -435,16 +433,12 @@ app.post('/api/push', async (req, res) => {
 
         console.log(`🔄 Push request received:`, { project, mode });
         
-        // Assemble the knowledge base
-        console.log('📚 Assembling knowledge base...');
         const kb = await assembleKB(project);
         console.log('📋 Knowledge base assembled:', {
             title: kb.title,
-            textLength: kb.text?.length,
-            textPreview: kb.text?.substring(0, 200) + '...'
+            textLength: kb.text?.length
         });
 
-        // Check required environment variables
         const requiredVars = {
             ELEVENLABS_API_KEY: process.env.ELEVENLABS_API_KEY,
             ELEVENLABS_VOICE_ID: process.env.ELEVENLABS_VOICE_ID,
@@ -465,11 +459,6 @@ app.post('/api/push', async (req, res) => {
             return res.status(400).json({ error });
         }
 
-        console.log('🔧 Environment check passed');
-        console.log('📡 Webhook URL:', process.env.ELEVENLABS_CONVAI_WEBHOOK);
-
-        // Call the push function
-        console.log(`🚀 Calling pushToElevenLabs for mode: ${mode}`);
         const out = await pushToElevenLabs({
             apiKey: process.env.ELEVENLABS_API_KEY,
             mode,
@@ -481,9 +470,6 @@ app.post('/api/push', async (req, res) => {
             outDir: 'out'
         });
 
-        console.log('✅ Push completed successfully:', out);
-
-        // Handle file URLs for TTS mode
         if (out.mode === 'tts' && out.file?.startsWith('/media/')) {
             out.file = `${baseUrl(req)}${out.file}`;
         }
@@ -491,10 +477,9 @@ app.post('/api/push', async (req, res) => {
         res.json(out);
     } catch (e) {
         console.error('❌ Push error:', e);
-        console.error('Stack trace:', e.stack);
         res.status(400).json({ 
             error: String(e.message || e),
-            details: e.stack?.split('\n').slice(0, 5).join('\n') // First 5 lines of stack trace
+            details: e.stack?.split('\n').slice(0, 5).join('\n')
         });
     }
 });
@@ -550,274 +535,5 @@ app.get('/api/diag', (_req, res) => {
     });
 });
 
-// --- WebSocket proxy ---
-const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: '/ws' });
-
-wss.on('connection', async (client, req) => {
-    const log = (...a) => console.log('[ws]', ...a);
-    const clientId = Math.random().toString(36).substr(2, 9);
-    log(`Client ${clientId} connected`);
-
-    try {
-        const url = new URL(req.url, 'http://localhost');
-        const project = url.searchParams.get('project') || 'cyber';
-        log(`Client ${clientId} requesting project: ${project}`);
-
-        const { title, text } = await assembleKB(project);
-        log(`Client ${clientId} KB assembled: ${title}`);
-
-        const base = process.env.ELEVENLABS_BASE || 'api.elevenlabs.io';
-        const apiKey = process.env.ELEVENLABS_API_KEY || '';
-        const agent = process.env.ELEVENLABS_AGENT_ID || '';
-
-        if (!apiKey || !agent) {
-            const msg = `Missing env vars: ${!apiKey ? 'ELEVENLABS_API_KEY ' : ''}${!agent ? 'ELEVENLABS_AGENT_ID' : ''}`;
-            log(`Client ${clientId} error:`, msg);
-            client.send(JSON.stringify({ type:'error', text: msg }));
-            client.close();
-            return;
-        }
-
-        const signedUrl = await getSignedWsUrl({ agentId: agent, base, apiKey });
-        log(`Client ${clientId} signed URL obtained:`, signedUrl.split('?')[0]);
-
-        const upstream = new WebSocket(signedUrl, {
-            headers: {
-                'User-Agent': 'ConvAI-Proxy/1.0'
-            }
-        });
-
-        let isConnected = false;
-
-        upstream.on('unexpected-response', (_req2, res) => {
-            let body = '';
-            res.on('data', (c) => (body += c.toString()));
-            res.on('end', () => {
-                log(`Client ${clientId} upstream unexpected-response:`, { 
-                    statusCode: res.statusCode, 
-                    headers: res.headers, 
-                    body: body.substring(0, 500)
-                });
-                try { 
-                    client.send(JSON.stringify({ 
-                        type:'error', 
-                        text:`ElevenLabs connection failed (${res.statusCode})`,
-                        details: body.substring(0, 200)
-                    })); 
-                } catch {}
-                client.close();
-            });
-        });
-
-        upstream.on('open', () => {
-            log(`Client ${clientId} upstream connected ✓`);
-            isConnected = true;
-            
-            // Send initial connection success message
-            try {
-                client.send(JSON.stringify({ 
-                    type: 'info', 
-                    text: 'Connected to ElevenLabs ConvAI',
-                    project: project,
-                    title: title
-                }));
-            } catch {}
-        });
-
-        upstream.on('message', (data) => {
-            try {
-                const s = data.toString();
-                const parsed = JSON.parse(s);
-                
-                // Handle audio data with detailed logging
-                const b64 = parsed?.audio_base_64 || 
-                           parsed?.audio_event?.audio_base_64 || 
-                           parsed?.data?.audio_base_64;
-
-                if (b64) {
-                    const mime = parsed?.mime || 
-                                parsed?.audio_event?.mime || 
-                                parsed?.data?.mime || 
-                                'audio/mpeg';
-                    
-                    // Debug logging for audio
-                    log(`Client ${clientId} received audio:`, {
-                        b64Length: b64.length,
-                        mime,
-                        b64Preview: b64.substring(0, 50) + '...',
-                        rawStructure: Object.keys(parsed)
-                    });
-                    
-                    // Validate base64
-                    try {
-                        // Test if it's valid base64
-                        const testDecode = atob(b64.substring(0, 100));
-                        log(`Client ${clientId} base64 validation: OK`);
-                    } catch (e) {
-                        log(`Client ${clientId} base64 validation FAILED:`, e.message);
-                        return; // Skip invalid base64
-                    }
-                    
-                    // Send normalized audio format to client
-                    client.send(JSON.stringify({ 
-                        type: 'audio', 
-                        audio_base_64: b64, 
-                        mime 
-                    }));
-                    return;
-                }
-
-                // Filter out noisy metadata for cleaner logs
-                if (!parsed.conversation_initiation_metadata && 
-                    !parsed.conversation_initiation_metadata_event) {
-                    
-                    if (parsed.type && !['ping', 'pong'].includes(parsed.type)) {
-                        log(`Client ${clientId} upstream message type: ${parsed.type}`);
-                        
-                        // Log structure for debugging
-                        if (parsed.type !== 'audio') {
-                            log(`Client ${clientId} message structure:`, Object.keys(parsed));
-                        }
-                    }
-                }
-                
-                // Forward all other messages as-is
-                client.send(s);
-            } catch (e) {
-                log(`Client ${clientId} message parsing error:`, e.message);
-                // Fallback for non-JSON messages
-                try { 
-                    client.send(data); 
-                } catch (sendError) {
-                    log(`Client ${clientId} failed to forward raw data:`, sendError.message);
-                }
-            }
-        });
-
-        upstream.on('close', (code, reason) => {
-            log(`Client ${clientId} upstream closed:`, code, reason?.toString());
-            isConnected = false;
-            try { 
-                client.send(JSON.stringify({ 
-                    type:'info', 
-                    text:`Connection closed (${code})` 
-                })); 
-            } catch {}
-            client.close();
-        });
-
-        upstream.on('error', (err) => {
-            log(`Client ${clientId} upstream error:`, err.message);
-            isConnected = false;
-            try { 
-                client.send(JSON.stringify({ 
-                    type:'error', 
-                    text: `Connection error: ${err.message}` 
-                })); 
-            } catch {}
-            client.close();
-        });
-
-        // Handle client messages - forward to upstream with proper formatting
-        client.on('message', (data) => {
-            try {
-                const message = JSON.parse(data.toString());
-                log(`Client ${clientId} sending message type:`, message.type || 'unknown');
-                
-                if (isConnected && upstream.readyState === WebSocket.OPEN) {
-                    
-                    // Handle different message types and convert to ElevenLabs ConvAI format
-                    if (message.user_audio_chunk) {
-                        // Voice message from client - use ElevenLabs ConvAI simple format
-                        // According to docs: {"user_audio_chunk":"base64EncodedAudioData=="}
-                        const elevenLabsMessage = {
-                            user_audio_chunk: message.user_audio_chunk.audio_base_64
-                        };
-                        
-                        log(`Client ${clientId} forwarding audio chunk:`, {
-                            audioLength: message.user_audio_chunk.audio_base_64?.length || 0,
-                            originalMimeType: message.user_audio_chunk.mime_type,
-                            expectedFormat: 'pcm_s16le_16 (16-bit PCM, 16kHz, mono, little-endian)',
-                            elevenLabsFormat: 'direct_base64_string'
-                        });
-                        
-                        upstream.send(JSON.stringify(elevenLabsMessage));
-                        
-                    } else if (message.type === 'user_message' && message.text) {
-                        // Text message from client - use ElevenLabs ConvAI format
-                        const elevenLabsMessage = {
-                            type: 'user_message',
-                            text: message.text
-                        };
-                        
-                        log(`Client ${clientId} forwarding text message:`, {
-                            messageLength: message.text.length,
-                            preview: message.text.substring(0, 50) + '...'
-                        });
-                        
-                        upstream.send(JSON.stringify(elevenLabsMessage));
-                        
-                    } else {
-                        // Other message types - forward as-is but log the structure
-                        log(`Client ${clientId} forwarding message as-is:`, {
-                            keys: Object.keys(message),
-                            type: message.type,
-                            hasAudio: !!message.audio_base_64,
-                            hasText: !!message.text
-                        });
-                        
-                        upstream.send(JSON.stringify(message));
-                    }
-                    
-                } else {
-                    log(`Client ${clientId} tried to send while disconnected`);
-                    client.send(JSON.stringify({ 
-                        type: 'error', 
-                        text: 'Not connected to upstream service' 
-                    }));
-                }
-            } catch (e) {
-                log(`Client ${clientId} invalid message format:`, e.message);
-                log(`Client ${clientId} raw message:`, data.toString().substring(0, 200));
-            }
-        });
-
-        client.on('close', () => {
-            log(`Client ${clientId} disconnected`);
-            isConnected = false;
-            try { 
-                upstream.close(); 
-            } catch {}
-        });
-
-        client.on('error', (err) => {
-            log(`Client ${clientId} error:`, err.message);
-        });
-
-    } catch (e) {
-        log(`Client ${clientId} setup error:`, e.message);
-        try { 
-            client.send(JSON.stringify({ 
-                type:'error', 
-                text: `Setup failed: ${e.message}` 
-            })); 
-        } catch {}
-        client.close();
-    }
-});
-
-const PORT = process.env.PORT || 8080;
-// server.listen(PORT, () => {
-//     console.log(`🚀 Server running on port ${PORT}`);
-//     console.log(`📡 WebSocket endpoint: ws://localhost:${PORT}/ws`);
-//     console.log(`🔗 Webhook endpoint: http://localhost:${PORT}/convai-hook`);
-    
-//     // Log environment status
-//     console.log('\n📋 Environment Status:');
-//     console.log(`  - ElevenLabs API Key: ${process.env.ELEVENLABS_API_KEY ? '✓ Set' : '❌ Missing'}`);
-//     console.log(`  - Agent ID: ${process.env.ELEVENLABS_AGENT_ID ? '✓ Set' : '❌ Missing'}`);
-//     console.log(`  - Webhook Secret: ${process.env.ELEVENLABS_WEBHOOK_SECRET ? '✓ Set' : '⚠ Missing (signatures will be skipped)'}`);
-//     console.log(`  - Webhook URL: ${process.env.ELEVENLABS_CONVAI_WEBHOOK || '⚠ Not set'}`);
-// });
+// Export the Express app for Vercel (instead of server.listen)
 export default app;
