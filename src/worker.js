@@ -19,7 +19,7 @@ export default {
       );
     }
     
-    // WebSocket proxy - this is the main fix
+    // WebSocket proxy - FIXED approach for Cloudflare Workers
     if (url.pathname === "/ws") {
       if (request.headers.get("Upgrade") !== "websocket") {
         return new Response("Expected WebSocket", { status: 426 });
@@ -51,10 +51,11 @@ export default {
       const [client, server] = Object.values(pair);
       server.accept();
       
-      // Get signed URL for ElevenLabs ConvAI
-      let signedUrl;
+      // *** CRITICAL FIX: Use direct WebSocket connection, not fetch() ***
       const base = env.ELEVENLABS_BASE || 'api.elevenlabs.io';
       
+      // Step 1: Get signed URL using regular HTTP fetch
+      let signedUrl;
       try {
         console.log("Getting signed URL for ConvAI...");
         const signedUrlResponse = await fetch(
@@ -75,7 +76,7 @@ export default {
           console.log("✅ Got signed URL successfully");
         } else {
           const errorText = await signedUrlResponse.text();
-          console.log("⚠️ Signed URL failed, trying public agent approach:", signedUrlResponse.status, errorText);
+          console.log("⚠️ Signed URL failed:", signedUrlResponse.status, errorText);
           // Fallback to public agent endpoint
           signedUrl = `wss://${base}/v1/convai/conversation?agent_id=${encodeURIComponent(agentId)}`;
         }
@@ -86,35 +87,39 @@ export default {
         console.log("Using public agent fallback");
       }
       
-      // Connect to ElevenLabs ConvAI WebSocket
+      // Step 2: Connect directly to ElevenLabs using WebSocket constructor
       console.log("Connecting to ElevenLabs:", signedUrl.split('?')[0]);
       
-      let upstreamResp;
       try {
-        const headers = {
+        // *** KEY FIX: Use direct fetch to WSS endpoint to get WebSocket ***
+        const wsHeaders = {
           "Upgrade": "websocket",
           "Connection": "Upgrade", 
           "Sec-WebSocket-Version": "13"
         };
         
-        // Add API key for public agent connections
-        if (signedUrl.includes("conversation?agent_id=") && !signedUrl.includes("token=")) {
-          headers["xi-api-key"] = env.ELEVENLABS_API_KEY;
+        // Add API key for public agent connections (those without token)
+        if (signedUrl.includes("conversation?agent_id=") && !signedUrl.includes("token=") && !signedUrl.includes("conversation_signature=")) {
+          wsHeaders["xi-api-key"] = env.ELEVENLABS_API_KEY;
         }
         
-        // Copy client WebSocket headers
+        // Copy essential client WebSocket headers
         const clientWsKey = request.headers.get("sec-websocket-key");
+        if (clientWsKey) {
+          wsHeaders["Sec-WebSocket-Key"] = clientWsKey;
+        }
+        
         const clientWsExt = request.headers.get("sec-websocket-extensions");
+        if (clientWsExt) {
+          wsHeaders["Sec-WebSocket-Extensions"] = clientWsExt;
+        }
         
-        if (clientWsKey) headers["Sec-WebSocket-Key"] = clientWsKey;
-        if (clientWsExt) headers["Sec-WebSocket-Extensions"] = clientWsExt;
-        
-        upstreamResp = await fetch(signedUrl, {
-          headers,
-          signal: AbortSignal.timeout(8000)
+        // This is the correct way to establish WebSocket connection in Workers
+        const upstreamResp = await fetch(signedUrl, {
+          headers: wsHeaders
         });
         
-        console.log("Upstream response:", upstreamResp.status, upstreamResp.statusText);
+        console.log("WebSocket upgrade response:", upstreamResp.status, upstreamResp.statusText);
         
         if (upstreamResp.status !== 101) {
           let errorBody = "";
@@ -133,177 +138,179 @@ export default {
           server.send(JSON.stringify({ 
             type: "error", 
             text: errorMessage,
-            status: upstreamResp.status
+            status: upstreamResp.status,
+            details: errorBody
           }));
           server.close(1008, "Connection failed");
           return new Response(errorMessage, { status: upstreamResp.status });
         }
         
-      } catch (e) {
-        console.error("WebSocket connection error:", e.message);
-        server.send(JSON.stringify({ 
-          type: "error", 
-          text: `Connection timeout: ${e.message}` 
-        }));
-        server.close(1011, "Connection timeout");
-        return new Response("Connection timeout", { status: 504 });
-      }
-      
-      const upstream = upstreamResp.webSocket;
-      if (!upstream) {
-        console.error("No WebSocket in response");
-        server.send(JSON.stringify({
-          type: "error",
-          text: "Invalid WebSocket upgrade response"
-        }));
-        server.close(1011, "Invalid WebSocket upgrade");
-        return new Response("Invalid WebSocket upgrade", { status: 502 });
-      }
-      
-      upstream.accept();
-      console.log("✅ WebSocket connection established");
-      
-      // Send connection success message
-      server.send(JSON.stringify({
-        type: "info",
-        text: "Connected to ElevenLabs ConvAI",
-        project,
-        agent_id: agentId
-      }));
-      
-      // Message forwarding: ElevenLabs → Client
-      upstream.addEventListener("message", (evt) => {
-        try {
-          const data = evt.data;
-          
-          // Handle different data types
-          if (typeof data === 'string') {
-            try {
-              const parsed = JSON.parse(data);
-              
-              // Extract audio data from various possible locations
-              const audioB64 = parsed?.audio_base_64 || 
-                             parsed?.audio_event?.audio_base_64 || 
-                             parsed?.data?.audio_base_64;
-              
-              if (audioB64) {
-                const mime = parsed?.mime || 
-                           parsed?.audio_event?.mime || 
-                           parsed?.data?.mime || 
-                           'audio/mpeg';
-                
-                console.log("Forwarding audio to client:", audioB64.length, "bytes");
-                
-                // Normalize audio format for client
-                server.send(JSON.stringify({
-                  type: 'audio',
-                  audio_base_64: audioB64,
-                  mime
-                }));
-                return;
-              }
-              
-              // Log non-audio messages (excluding noisy metadata)
-              if (!parsed.conversation_initiation_metadata && 
-                  !parsed.conversation_initiation_metadata_event &&
-                  parsed.type && !['ping', 'pong'].includes(parsed.type)) {
-                console.log("Forwarding message type:", parsed.type);
-              }
-            } catch (parseError) {
-              console.log("Non-JSON message from upstream");
-            }
-          }
-          
-          // Forward message as-is
-          server.send(data);
-          
-        } catch (e) {
-          console.error("Error forwarding upstream message:", e.message);
+        // Get the WebSocket from the response
+        const upstream = upstreamResp.webSocket;
+        if (!upstream) {
+          console.error("No WebSocket in response");
+          server.send(JSON.stringify({
+            type: "error",
+            text: "Invalid WebSocket upgrade response"
+          }));
+          server.close(1011, "Invalid WebSocket upgrade");
+          return new Response("Invalid WebSocket upgrade", { status: 502 });
         }
-      });
-      
-      // Message forwarding: Client → ElevenLabs
-      server.addEventListener("message", (evt) => {
-        try {
-          const data = evt.data;
-          
-          if (upstream.readyState === WebSocket.READY_STATE_OPEN) {
+        
+        // Accept the upstream WebSocket
+        upstream.accept();
+        console.log("✅ WebSocket connection established");
+        
+        // Send connection success message
+        server.send(JSON.stringify({
+          type: "info",
+          text: "Connected to ElevenLabs ConvAI",
+          project,
+          agent_id: agentId.substring(0, 12) + "..."
+        }));
+        
+        // Message forwarding: ElevenLabs → Client
+        upstream.addEventListener("message", (evt) => {
+          try {
+            const data = evt.data;
+            
+            // Handle string messages (JSON)
             if (typeof data === 'string') {
               try {
-                const message = JSON.parse(data);
+                const parsed = JSON.parse(data);
                 
-                // Handle different message types from client
-                if (message.user_audio_chunk) {
-                  // Voice message - convert to ElevenLabs format
-                  const elevenLabsMessage = {
-                    user_audio_chunk: message.user_audio_chunk.audio_base_64 || message.user_audio_chunk
-                  };
-                  console.log("Forwarding audio chunk to ElevenLabs");
-                  upstream.send(JSON.stringify(elevenLabsMessage));
+                // Extract and normalize audio data
+                const audioB64 = parsed?.audio_base_64 || 
+                               parsed?.audio_event?.audio_base_64 || 
+                               parsed?.data?.audio_base_64;
+                
+                if (audioB64) {
+                  const mime = parsed?.mime || 
+                             parsed?.audio_event?.mime || 
+                             parsed?.data?.mime || 
+                             'audio/mpeg';
                   
-                } else if (message.type === 'user_message' && message.text) {
-                  // Text message
-                  const elevenLabsMessage = {
-                    type: 'user_message',
-                    text: message.text
-                  };
-                  console.log("Forwarding text message to ElevenLabs");
-                  upstream.send(JSON.stringify(elevenLabsMessage));
+                  console.log("📡 Forwarding audio to client:", audioB64.length, "bytes");
                   
-                } else {
-                  // Other message types - forward as-is
-                  console.log("Forwarding message type:", message.type || 'unknown');
-                  upstream.send(data);
+                  // Send normalized audio format
+                  server.send(JSON.stringify({
+                    type: 'audio',
+                    audio_base_64: audioB64,
+                    mime
+                  }));
+                  return;
+                }
+                
+                // Log interesting message types (skip metadata noise)
+                if (!parsed.conversation_initiation_metadata && 
+                    !parsed.conversation_initiation_metadata_event &&
+                    parsed.type && !['ping', 'pong'].includes(parsed.type)) {
+                  console.log("📨 Message type:", parsed.type);
                 }
               } catch (parseError) {
-                // Non-JSON data - forward as-is
+                console.log("📨 Non-JSON message from upstream");
+              }
+            }
+            
+            // Forward all messages as-is to client
+            server.send(data);
+            
+          } catch (e) {
+            console.error("❌ Error forwarding upstream message:", e.message);
+          }
+        });
+        
+        // Message forwarding: Client → ElevenLabs
+        server.addEventListener("message", (evt) => {
+          try {
+            const data = evt.data;
+            
+            if (upstream.readyState === 1) { // WebSocket.OPEN
+              if (typeof data === 'string') {
+                try {
+                  const message = JSON.parse(data);
+                  
+                  // Convert client messages to ElevenLabs ConvAI format
+                  if (message.user_audio_chunk) {
+                    // Audio from client
+                    const audioData = message.user_audio_chunk.audio_base_64 || message.user_audio_chunk;
+                    const elevenLabsMessage = { user_audio_chunk: audioData };
+                    console.log("🎤 Forwarding audio to ElevenLabs");
+                    upstream.send(JSON.stringify(elevenLabsMessage));
+                    
+                  } else if (message.type === 'user_message' && message.text) {
+                    // Text from client
+                    const elevenLabsMessage = {
+                      type: 'user_message',
+                      text: message.text
+                    };
+                    console.log("💬 Forwarding text to ElevenLabs:", message.text.substring(0, 50) + "...");
+                    upstream.send(JSON.stringify(elevenLabsMessage));
+                    
+                  } else {
+                    // Other messages - forward as-is
+                    console.log("📤 Forwarding message:", message.type || 'unknown');
+                    upstream.send(data);
+                  }
+                } catch (parseError) {
+                  // Non-JSON - forward as-is
+                  upstream.send(data);
+                }
+              } else {
+                // Binary data - forward as-is
                 upstream.send(data);
               }
             } else {
-              // Binary data - forward as-is
-              upstream.send(data);
+              console.log("⚠️ Attempted to send to closed upstream");
+              server.send(JSON.stringify({
+                type: 'error',
+                text: 'Connection to ElevenLabs lost'
+              }));
             }
-          } else {
-            console.log("Attempted to send to closed upstream connection");
-            server.send(JSON.stringify({
-              type: 'error',
-              text: 'Connection to ElevenLabs lost'
-            }));
+          } catch (e) {
+            console.error("❌ Error forwarding client message:", e.message);
           }
-        } catch (e) {
-          console.error("Error forwarding client message:", e.message);
-        }
-      });
-      
-      // Connection cleanup handlers
-      const safeClose = (ws, reason = "") => { 
-        try { 
-          if (ws.readyState === WebSocket.READY_STATE_OPEN) {
-            ws.close();
-          }
-          if (reason) console.log("Closed WebSocket:", reason);
-        } catch {} 
-      };
-      
-      server.addEventListener("close", (evt) => {
-        console.log("Client disconnected:", evt.code, evt.reason);
-        safeClose(upstream, "client closed");
-      });
-      
-      server.addEventListener("error", (evt) => {
-        console.error("Client WebSocket error:", evt);
-        safeClose(upstream, "client error");
-      });
-      
-      upstream.addEventListener("close", (evt) => {
-        console.log("ElevenLabs connection closed:", evt.code, evt.reason);
-        safeClose(server, "upstream closed");
-      });
-      
-      upstream.addEventListener("error", (evt) => {
-        console.error("ElevenLabs WebSocket error:", evt);
-        safeClose(server, "upstream error");
-      });
+        });
+        
+        // Connection cleanup handlers
+        const safeClose = (ws, reason = "") => { 
+          try { 
+            if (ws.readyState === 1) { // OPEN
+              ws.close();
+            }
+            if (reason) console.log("🔌 Closed:", reason);
+          } catch {} 
+        };
+        
+        server.addEventListener("close", (evt) => {
+          console.log("🔌 Client disconnected:", evt.code, evt.reason);
+          safeClose(upstream, "client closed");
+        });
+        
+        server.addEventListener("error", (evt) => {
+          console.error("❌ Client error:", evt);
+          safeClose(upstream, "client error");
+        });
+        
+        upstream.addEventListener("close", (evt) => {
+          console.log("🔌 ElevenLabs closed:", evt.code, evt.reason);
+          safeClose(server, "upstream closed");
+        });
+        
+        upstream.addEventListener("error", (evt) => {
+          console.error("❌ ElevenLabs error:", evt);
+          safeClose(server, "upstream error");
+        });
+        
+      } catch (connectionError) {
+        console.error("❌ WebSocket connection failed:", connectionError.message);
+        server.send(JSON.stringify({ 
+          type: "error", 
+          text: `Connection failed: ${connectionError.message}` 
+        }));
+        server.close(1011, "Connection failed");
+        return new Response("Connection failed", { status: 502 });
+      }
       
       return new Response(null, { status: 101, webSocket: client });
     }
