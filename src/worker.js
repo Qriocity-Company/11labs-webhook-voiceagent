@@ -53,8 +53,11 @@ export default {
             // "Sec-WebSocket-Protocol": "convai"
           },
           // Don’t let this hang forever
-          signal: AbortSignal.timeout(7000),
+          signal: AbortSignal.timeout(3000),
+
         });
+          console.log("Upstream response status:", upstreamResp.status);
+          console.log("Upstream response headers:", [...upstreamResp.headers.entries()]);
       } catch (e) {
         server.send(JSON.stringify({ type: "error", text: "Upstream fetch failed: " + e.message }));
         server.close(1011, "Upstream fetch failed");
