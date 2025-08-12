@@ -114,8 +114,12 @@ export default {
           wsHeaders["Sec-WebSocket-Extensions"] = clientWsExt;
         }
         
-        // This is the correct way to establish WebSocket connection in Workers
-        const upstreamResp = await fetch(signedUrl, {
+        // Convert WSS URL to HTTPS for fetch (Cloudflare Workers requirement)
+        const httpsUrl = signedUrl.replace('wss://', 'https://');
+        console.log("Converting WSS to HTTPS:", httpsUrl);
+        
+        // Fetch the HTTPS endpoint with WebSocket upgrade headers
+        const upstreamResp = await fetch(httpsUrl, {
           headers: wsHeaders
         });
         
