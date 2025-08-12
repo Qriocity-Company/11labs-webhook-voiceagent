@@ -28,7 +28,7 @@ const upload = multer({
 });
 
 // IMPORTANT: STT endpoint MUST come BEFORE app.use(express.json())
-app.post('/api/stt', upload.single('audio'), async (req, res) => {
+app.post('/stt', upload.single('audio'), async (req, res) => {
     try {
         if (!req.file) {
             return res.status(400).json({ error: 'No audio file provided' });
@@ -62,7 +62,7 @@ app.post('/api/stt', upload.single('audio'), async (req, res) => {
         console.log('📡 Sending to ElevenLabs STT API...');
 
         // Call ElevenLabs Speech-to-Text API
-        const sttResponse = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+        const sttResponse = await fetch('https:/ .elevenlabs.io/v1/speech-to-text', {
             method: 'POST',
             headers: {
                 'xi-api-key': apiKey,
@@ -405,7 +405,7 @@ async function updateConvAIKnowledgeBase({ apiKey, agentId, title, content }) {
 }
 
 // --- API routes ---
-app.get('/api/projects', async (_req, res) => {
+app.get('/projects', async (_req, res) => {
     try {
       const ps = await listProjects();
       res.json(ps);
@@ -414,7 +414,7 @@ app.get('/api/projects', async (_req, res) => {
     }
 });
 
-app.get('/api/kb/:key', async (req, res) => {
+app.get('/kb/:key', async (req, res) => {
     try {
         const { title, text } = await assembleKB(req.params.key);
         res.json({ title, text });
@@ -424,7 +424,7 @@ app.get('/api/kb/:key', async (req, res) => {
     }
 });
 
-app.post('/api/push', async (req, res) => {
+app.post('/push', async (req, res) => {
     try {
         const { project, mode } = req.body || {};
         if (!project || !mode) {
@@ -484,7 +484,7 @@ app.post('/api/push', async (req, res) => {
     }
 });
 
-app.post('/api/tts', async (req, res) => {
+app.post('/tts', async (req, res) => {
     try {
         const { project } = req.body || {};
         if (!project) return res.status(400).json({ error: 'project required' });
@@ -505,7 +505,7 @@ app.post('/api/tts', async (req, res) => {
     }
 });
 
-app.get('/api/realtime/:project', async (req, res) => {
+app.get('/realtime/:project', async (req, res) => {
     try {
         const { project } = req.params;
         const kb = await assembleKB(project);
@@ -522,7 +522,7 @@ app.get('/api/realtime/:project', async (req, res) => {
     }
 });
 
-app.get('/api/diag', (_req, res) => {
+app.get('/diag', (_req, res) => {
     const red = (v) => (v ? (v.length > 10 ? v.slice(0,4)+'…'+v.slice(-4) : v) : '');
     res.json({
         ELEVENLABS_BASE: process.env.ELEVENLABS_BASE || 'api.elevenlabs.io',
