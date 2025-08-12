@@ -808,15 +808,16 @@ wss.on('connection', async (client, req) => {
 });
 
 const PORT = process.env.PORT || 8080;
-server.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
-    console.log(`📡 WebSocket endpoint: ws://localhost:${PORT}/ws`);
-    console.log(`🔗 Webhook endpoint: http://localhost:${PORT}/convai-hook`);
+// server.listen(PORT, () => {
+//     console.log(`🚀 Server running on port ${PORT}`);
+//     console.log(`📡 WebSocket endpoint: ws://localhost:${PORT}/ws`);
+//     console.log(`🔗 Webhook endpoint: http://localhost:${PORT}/convai-hook`);
     
-    // Log environment status
-    console.log('\n📋 Environment Status:');
-    console.log(`  - ElevenLabs API Key: ${process.env.ELEVENLABS_API_KEY ? '✓ Set' : '❌ Missing'}`);
-    console.log(`  - Agent ID: ${process.env.ELEVENLABS_AGENT_ID ? '✓ Set' : '❌ Missing'}`);
-    console.log(`  - Webhook Secret: ${process.env.ELEVENLABS_WEBHOOK_SECRET ? '✓ Set' : '⚠ Missing (signatures will be skipped)'}`);
-    console.log(`  - Webhook URL: ${process.env.ELEVENLABS_CONVAI_WEBHOOK || '⚠ Not set'}`);
-});
+//     // Log environment status
+//     console.log('\n📋 Environment Status:');
+//     console.log(`  - ElevenLabs API Key: ${process.env.ELEVENLABS_API_KEY ? '✓ Set' : '❌ Missing'}`);
+//     console.log(`  - Agent ID: ${process.env.ELEVENLABS_AGENT_ID ? '✓ Set' : '❌ Missing'}`);
+//     console.log(`  - Webhook Secret: ${process.env.ELEVENLABS_WEBHOOK_SECRET ? '✓ Set' : '⚠ Missing (signatures will be skipped)'}`);
+//     console.log(`  - Webhook URL: ${process.env.ELEVENLABS_CONVAI_WEBHOOK || '⚠ Not set'}`);
+// });
+export default app;
