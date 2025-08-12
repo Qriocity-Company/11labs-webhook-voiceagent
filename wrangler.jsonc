@@ -1,0 +1,9 @@
+{
+  "name": "voice-ws-proxy",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-08-12",
+  "vars": {
+    "ELEVENLABS_MODEL": "eleven_flash_v2",
+    "ELEVENLABS_AGENT_ID": "agent_8701k1xp8d5xf0q9zg26pyz3tbzx"
+  }
+}
