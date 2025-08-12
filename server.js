@@ -62,7 +62,7 @@ app.post('/stt', upload.single('audio'), async (req, res) => {
         console.log('📡 Sending to ElevenLabs STT API...');
 
         // Call ElevenLabs Speech-to-Text API
-        const sttResponse = await fetch('https:/ .elevenlabs.io/v1/speech-to-text', {
+        const sttResponse = await fetch('https:/api.elevenlabs.io/v1/speech-to-text', {
             method: 'POST',
             headers: {
                 'xi-api-key': apiKey,
