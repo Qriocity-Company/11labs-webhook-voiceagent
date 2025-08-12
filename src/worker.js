@@ -19,7 +19,7 @@ export default {
       );
     }
     
-    // WebSocket proxy - FIXED approach for Cloudflare Workers
+    // WebSocket proxy with keepalive and connection management
     if (url.pathname === "/ws") {
       if (request.headers.get("Upgrade") !== "websocket") {
         return new Response("Expected WebSocket", { status: 426 });
@@ -40,10 +40,11 @@ export default {
         return new Response("Missing agent ID", { status: 500 });
       }
       
-      console.log("Starting WebSocket proxy:", {
+      console.log("🚀 Starting WebSocket proxy with keepalive:", {
         agentId: agentId.substring(0, 12) + "...",
         project,
-        model
+        model,
+        timestamp: new Date().toISOString()
       });
       
       // Accept client socket first
@@ -51,13 +52,32 @@ export default {
       const [client, server] = Object.values(pair);
       server.accept();
       
-      // *** CRITICAL FIX: Use direct WebSocket connection, not fetch() ***
+      // Connection management variables
+      let pingInterval;
+      let healthCheckInterval;
+      let lastActivity = Date.now();
+      let connectionStartTime = Date.now();
+      let isConnected = false;
+      
       const base = env.ELEVENLABS_BASE || 'api.elevenlabs.io';
+      
+      // Cleanup function
+      const cleanup = () => {
+        if (pingInterval) {
+          clearInterval(pingInterval);
+          pingInterval = null;
+        }
+        if (healthCheckInterval) {
+          clearInterval(healthCheckInterval);
+          healthCheckInterval = null;
+        }
+        console.log("🧹 Cleaned up intervals");
+      };
       
       // Step 1: Get signed URL using regular HTTP fetch
       let signedUrl;
       try {
-        console.log("Getting signed URL for ConvAI...");
+        console.log("🔐 Getting signed URL for ConvAI...");
         const signedUrlResponse = await fetch(
           `https://${base}/v1/convai/conversation/get_signed_url?agent_id=${encodeURIComponent(agentId)}`,
           {
@@ -81,24 +101,23 @@ export default {
           signedUrl = `wss://${base}/v1/convai/conversation?agent_id=${encodeURIComponent(agentId)}`;
         }
       } catch (e) {
-        console.error("Error getting signed URL:", e.message);
+        console.error("❌ Error getting signed URL:", e.message);
         // Fallback to public agent endpoint
         signedUrl = `wss://${base}/v1/convai/conversation?agent_id=${encodeURIComponent(agentId)}`;
-        console.log("Using public agent fallback");
+        console.log("🔄 Using public agent fallback");
       }
       
-      // Step 2: Connect directly to ElevenLabs using WebSocket constructor
-      console.log("Connecting to ElevenLabs:", signedUrl.split('?')[0]);
+      // Step 2: Connect to ElevenLabs
+      console.log("🔗 Connecting to ElevenLabs:", signedUrl.split('?')[0]);
       
       try {
-        // *** KEY FIX: Use direct fetch to WSS endpoint to get WebSocket ***
         const wsHeaders = {
           "Upgrade": "websocket",
           "Connection": "Upgrade", 
           "Sec-WebSocket-Version": "13"
         };
         
-        // Add API key for public agent connections (those without token)
+        // Add API key for public agent connections
         if (signedUrl.includes("conversation?agent_id=") && !signedUrl.includes("token=") && !signedUrl.includes("conversation_signature=")) {
           wsHeaders["xi-api-key"] = env.ELEVENLABS_API_KEY;
         }
@@ -114,16 +133,15 @@ export default {
           wsHeaders["Sec-WebSocket-Extensions"] = clientWsExt;
         }
         
-        // Convert WSS URL to HTTPS for fetch (Cloudflare Workers requirement)
+        // Convert WSS URL to HTTPS for fetch
         const httpsUrl = signedUrl.replace('wss://', 'https://');
-        console.log("Converting WSS to HTTPS:", httpsUrl);
+        console.log("🔄 Converting WSS to HTTPS:", httpsUrl.split('?')[0]);
         
-        // Fetch the HTTPS endpoint with WebSocket upgrade headers
         const upstreamResp = await fetch(httpsUrl, {
           headers: wsHeaders
         });
         
-        console.log("WebSocket upgrade response:", upstreamResp.status, upstreamResp.statusText);
+        console.log("📡 WebSocket upgrade response:", upstreamResp.status, upstreamResp.statusText);
         
         if (upstreamResp.status !== 101) {
           let errorBody = "";
@@ -131,7 +149,7 @@ export default {
             errorBody = await upstreamResp.text(); 
           } catch {}
           
-          console.error(`WebSocket upgrade failed: ${upstreamResp.status} ${errorBody}`);
+          console.error(`❌ WebSocket upgrade failed: ${upstreamResp.status} ${errorBody}`);
           
           const errorMessage = upstreamResp.status === 403 
             ? "Authentication failed - check API key and agent permissions"
@@ -139,6 +157,7 @@ export default {
             ? "Agent not found - verify agent ID"
             : `Connection failed: ${upstreamResp.status} ${errorBody}`;
           
+          cleanup();
           server.send(JSON.stringify({ 
             type: "error", 
             text: errorMessage,
@@ -149,10 +168,10 @@ export default {
           return new Response(errorMessage, { status: upstreamResp.status });
         }
         
-        // Get the WebSocket from the response
         const upstream = upstreamResp.webSocket;
         if (!upstream) {
-          console.error("No WebSocket in response");
+          console.error("❌ No WebSocket in response");
+          cleanup();
           server.send(JSON.stringify({
             type: "error",
             text: "Invalid WebSocket upgrade response"
@@ -161,27 +180,95 @@ export default {
           return new Response("Invalid WebSocket upgrade", { status: 502 });
         }
         
-        // Accept the upstream WebSocket
         upstream.accept();
-        console.log("✅ WebSocket connection established");
+        isConnected = true;
+        lastActivity = Date.now();
+        connectionStartTime = Date.now();
+        
+        console.log("✅ WebSocket connection established successfully");
         
         // Send connection success message
         server.send(JSON.stringify({
           type: "info",
           text: "Connected to ElevenLabs ConvAI",
           project,
-          agent_id: agentId.substring(0, 12) + "..."
+          agent_id: agentId.substring(0, 12) + "...",
+          timestamp: new Date().toISOString()
         }));
         
-        // Message forwarding: ElevenLabs → Client
+        // *** KEEPALIVE SYSTEM ***
+        
+        // Send ping every 25 seconds to keep connection alive
+        pingInterval = setInterval(() => {
+          if (upstream.readyState === 1) { // OPEN
+            try {
+              console.log("🏓 Sending keepalive ping to ElevenLabs");
+              upstream.send(JSON.stringify({ type: "ping", timestamp: Date.now() }));
+              lastActivity = Date.now();
+            } catch (e) {
+              console.error("⚠️ Ping failed:", e.message);
+              cleanup();
+            }
+          } else {
+            console.log("🔌 Upstream not open, stopping ping");
+            cleanup();
+          }
+        }, 25000); // 25 seconds
+        
+        // Health check every 45 seconds
+        healthCheckInterval = setInterval(() => {
+          const timeSinceLastActivity = Date.now() - lastActivity;
+          const connectionDuration = Date.now() - connectionStartTime;
+          
+          console.log("🔍 Health check:", {
+            timeSinceLastActivity: Math.round(timeSinceLastActivity / 1000) + "s",
+            connectionDuration: Math.round(connectionDuration / 1000) + "s",
+            upstreamState: upstream.readyState === 1 ? "OPEN" : "CLOSED",
+            serverState: server.readyState === 1 ? "OPEN" : "CLOSED"
+          });
+          
+          // If no activity for 90 seconds, close connection
+          if (timeSinceLastActivity > 90000) {
+            console.log("💀 Connection appears inactive, closing");
+            cleanup();
+            server.send(JSON.stringify({
+              type: "error",
+              text: "Connection timeout due to inactivity"
+            }));
+            server.close(1000, "Inactivity timeout");
+            return;
+          }
+          
+          // Send connection stats every 2 minutes
+          if (connectionDuration > 0 && connectionDuration % 120000 < 45000) {
+            server.send(JSON.stringify({
+              type: "info",
+              text: `Connection active for ${Math.round(connectionDuration / 60000)} minutes`,
+              stats: {
+                duration: connectionDuration,
+                lastActivity: timeSinceLastActivity
+              }
+            }));
+          }
+        }, 45000); // 45 seconds
+        
+        // *** MESSAGE FORWARDING ***
+        
+        // ElevenLabs → Client
         upstream.addEventListener("message", (evt) => {
           try {
+            lastActivity = Date.now(); // Update activity timestamp
             const data = evt.data;
             
-            // Handle string messages (JSON)
             if (typeof data === 'string') {
               try {
                 const parsed = JSON.parse(data);
+                
+                // Handle pong responses
+                if (parsed.type === 'pong') {
+                  console.log("🏓 Received pong from ElevenLabs");
+                  return;
+                }
                 
                 // Extract and normalize audio data
                 const audioB64 = parsed?.audio_base_64 || 
@@ -194,9 +281,8 @@ export default {
                              parsed?.data?.mime || 
                              'audio/mpeg';
                   
-                  console.log("📡 Forwarding audio to client:", audioB64.length, "bytes");
+                  console.log("🔊 Forwarding audio to client:", audioB64.length, "bytes");
                   
-                  // Send normalized audio format
                   server.send(JSON.stringify({
                     type: 'audio',
                     audio_base_64: audioB64,
@@ -224,26 +310,32 @@ export default {
           }
         });
         
-        // Message forwarding: Client → ElevenLabs
+        // Client → ElevenLabs
         server.addEventListener("message", (evt) => {
           try {
+            lastActivity = Date.now(); // Update activity timestamp
             const data = evt.data;
             
-            if (upstream.readyState === 1) { // WebSocket.OPEN
+            if (upstream.readyState === 1) { // OPEN
               if (typeof data === 'string') {
                 try {
                   const message = JSON.parse(data);
                   
+                  // Handle client ping
+                  if (message.type === 'ping') {
+                    console.log("🏓 Received ping from client, sending pong");
+                    server.send(JSON.stringify({ type: "pong", timestamp: Date.now() }));
+                    return;
+                  }
+                  
                   // Convert client messages to ElevenLabs ConvAI format
                   if (message.user_audio_chunk) {
-                    // Audio from client
                     const audioData = message.user_audio_chunk.audio_base_64 || message.user_audio_chunk;
                     const elevenLabsMessage = { user_audio_chunk: audioData };
                     console.log("🎤 Forwarding audio to ElevenLabs");
                     upstream.send(JSON.stringify(elevenLabsMessage));
                     
                   } else if (message.type === 'user_message' && message.text) {
-                    // Text from client
                     const elevenLabsMessage = {
                       type: 'user_message',
                       text: message.text
@@ -252,16 +344,13 @@ export default {
                     upstream.send(JSON.stringify(elevenLabsMessage));
                     
                   } else {
-                    // Other messages - forward as-is
                     console.log("📤 Forwarding message:", message.type || 'unknown');
                     upstream.send(data);
                   }
                 } catch (parseError) {
-                  // Non-JSON - forward as-is
                   upstream.send(data);
                 }
               } else {
-                // Binary data - forward as-is
                 upstream.send(data);
               }
             } else {
@@ -276,10 +365,11 @@ export default {
           }
         });
         
-        // Connection cleanup handlers
+        // *** CONNECTION CLEANUP HANDLERS ***
+        
         const safeClose = (ws, reason = "") => { 
           try { 
-            if (ws.readyState === 1) { // OPEN
+            if (ws && ws.readyState === 1) {
               ws.close();
             }
             if (reason) console.log("🔌 Closed:", reason);
@@ -287,27 +377,46 @@ export default {
         };
         
         server.addEventListener("close", (evt) => {
-          console.log("🔌 Client disconnected:", evt.code, evt.reason);
+          const duration = Date.now() - connectionStartTime;
+          console.log("🔌 Client disconnected:", {
+            code: evt.code, 
+            reason: evt.reason,
+            duration: Math.round(duration / 1000) + "s"
+          });
+          cleanup();
           safeClose(upstream, "client closed");
+          isConnected = false;
         });
         
         server.addEventListener("error", (evt) => {
           console.error("❌ Client error:", evt);
+          cleanup();
           safeClose(upstream, "client error");
+          isConnected = false;
         });
         
         upstream.addEventListener("close", (evt) => {
-          console.log("🔌 ElevenLabs closed:", evt.code, evt.reason);
+          const duration = Date.now() - connectionStartTime;
+          console.log("🔌 ElevenLabs closed:", {
+            code: evt.code, 
+            reason: evt.reason,
+            duration: Math.round(duration / 1000) + "s"
+          });
+          cleanup();
           safeClose(server, "upstream closed");
+          isConnected = false;
         });
         
         upstream.addEventListener("error", (evt) => {
           console.error("❌ ElevenLabs error:", evt);
+          cleanup();
           safeClose(server, "upstream error");
+          isConnected = false;
         });
         
       } catch (connectionError) {
         console.error("❌ WebSocket connection failed:", connectionError.message);
+        cleanup();
         server.send(JSON.stringify({ 
           type: "error", 
           text: `Connection failed: ${connectionError.message}` 
