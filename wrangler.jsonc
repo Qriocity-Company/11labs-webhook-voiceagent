@@ -1,5 +1,5 @@
 {
-  "name": "voice-ws-proxy",
+  "name": "11labs-web",
   "main": "src/worker.js",
   "compatibility_date": "2025-08-12",
   "vars": {
