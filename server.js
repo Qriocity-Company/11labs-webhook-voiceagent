@@ -535,6 +535,23 @@ app.get('/realtime/:project', async (req, res) => {
     }
 });
 
+app.get('/realtime', async (req, res) => {
+  try {
+    const project = req.query.project;
+    if (!project) return res.status(400).json({ error: 'project required' });
+    const kb = await assembleKB(project);
+    res.json(makeRealtimeSessionPayload({
+      project,
+      kbTitle: kb.title,
+      kbText: kb.text,
+      model: process.env.ELEVENLABS_MODEL || 'eleven_flash_v2',
+      agentId: process.env.ELEVENLABS_AGENT_ID || ''
+    }));
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
 app.get('/diag', (_req, res) => {
     const red = (v) => (v ? (v.length > 10 ? v.slice(0,4)+'…'+v.slice(-4) : v) : '');
     res.json({
